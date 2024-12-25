@@ -1,6 +1,6 @@
-# HybridConvViT: Semi-Supervised Image Colorization
+# ChromaFusion: Semi-Supervised Image Colorization
 
-HybridConvViT is an innovative model designed for colorizing grayscale images by combining convolutional layers with Vision Transformer (ViT) blocks. It leverages semi-supervised learning to achieve high accuracy even with limited labeled data. Additionally, HybridConvViT allows user interaction for enhanced colorization, enabling users to specify areas to color and choose colors interactively. This user-guided approach provides flexibility and improves the model's performance in achieving desired colorization results.
+ChromaFusion is an innovative model designed for colorizing grayscale images by combining convolutional layers with Vision Transformer (ViT) blocks. It leverages semi-supervised learning to achieve high accuracy even with limited labeled data. Additionally, ChromaFusion allows user interaction for enhanced colorization, enabling users to specify areas to color and choose colors interactively. This user-guided approach provides flexibility and improves the model's performance in achieving desired colorization results.
 
 ## Table of Contents
 
@@ -18,31 +18,31 @@ HybridConvViT is an innovative model designed for colorizing grayscale images by
 
 ## Overview
 
-### Motivation for Creating HybridConvViT
+### Motivation for Creating ChromaFusion
 
-The inspiration for developing HybridConvViT comes from a personal passion for historical war images and a desire to bring new life to my grandparents' cherished black and white photographs. Many of these images, some over 100 years old, capture significant moments in history but have lost their vibrancy over time. Colorizing these images not only enhances their visual appeal but also helps in better understanding and connecting with the past.
+The inspiration for developing ChromaFusion comes from a personal passion for historical war images and a desire to bring new life to my grandparents' cherished black and white photographs. Many of these images, some over 100 years old, capture significant moments in history but have lost their vibrancy over time. Colorizing these images not only enhances their visual appeal but also helps in better understanding and connecting with the past.
 
 ### Why Combine Convolutional Layers with a Vision Transformer (ViT)?
 
-Combining convolutional layers with Vision Transformer (ViT) blocks allows HybridConvViT to leverage the strengths of both architectures:
+Combining convolutional layers with Vision Transformer (ViT) blocks allows ChromaFusion to leverage the strengths of both architectures:
 
 - **Convolutional Layers**: These are excellent at capturing fine-grained local details and textures in images, making them ideal for tasks involving spatial hierarchies.
   
 - **Vision Transformers (ViT)**: ViTs excel at modeling long-range dependencies and understanding the global context of an image. They can effectively capture relationships between distant pixels, which is crucial for holistic image comprehension.
 
-By integrating these two approaches, HybridConvViT can simultaneously capture detailed local features and the broader context, resulting in more accurate and realistic colorization of grayscale images.
+By integrating these two approaches, ChromaFusion can simultaneously capture detailed local features and the broader context, resulting in more accurate and realistic colorization of grayscale images.
 
 ### How Does Semi-Supervised Learning Come into Play?
 
-Semi-supervised learning is a key component of HybridConvViT, enabling it to perform well even with limited labeled data. Here’s how it benefits the model:
+Semi-supervised learning is a key component of ChromaFusion, enabling it to perform well even with limited labeled data. Here’s how it benefits the model:
 
 - **Leveraging Unlabeled Data**: Historical images often lack corresponding color labels. Semi-supervised learning allows the model to learn from both labeled and unlabeled data, significantly improving its generalization capabilities.
   
 - **Improved Accuracy**: The inclusion of unlabeled data helps the model to learn more robust features, leading to better colorization results. It enhances the model's ability to understand various contexts and structures within the images.
   
-- **User Interaction**: HybridConvViT also supports user interaction, allowing users to specify areas to color and choose colors interactively. This user-guided approach provides additional supervision, making the colorization process more precise and customizable.
+- **User Interaction**: ChromaFusion also supports user interaction, allowing users to specify areas to color and choose colors interactively. This user-guided approach provides additional supervision, making the colorization process more precise and customizable.
 
-In summary, HybridConvViT combines the best of convolutional networks and Vision Transformers to effectively capture both local details and global context in images. By utilizing semi-supervised learning and enabling user interaction, it addresses the challenges of limited labeled data and provides a powerful tool for bringing historical black and white images back to life.
+In summary, ChromaFusion combines the best of convolutional networks and Vision Transformers to effectively capture both local details and global context in images. By utilizing semi-supervised learning and enabling user interaction, it addresses the challenges of limited labeled data and provides a powerful tool for bringing historical black and white images back to life.
 
 ## Key Features
 
@@ -80,11 +80,11 @@ In summary, HybridConvViT combines the best of convolutional networks and Vision
 
 ## Contributing
 
-We welcome contributions to the HybridConvViT project! Here are some ways you can contribute:
+We welcome contributions to the ChromaFusion project! Here are some ways you can contribute:
 
 ### Issues
 
-If you encounter any bugs, have feature requests, or need help, please open an issue on our [GitHub Issues](https://github.com/lunovian/HybridConvViT/issues) page. Provide as much detail as possible to help us understand and resolve the issue.
+If you encounter any bugs, have feature requests, or need help, please open an issue on our [GitHub Issues](https://github.com/lunovian/ChromaFusion/issues) page. Provide as much detail as possible to help us understand and resolve the issue.
 
 ### Pull Requests
 
@@ -95,7 +95,7 @@ If you'd like to contribute code, follow these steps:
 2. **Clone the Forked Repository**: Clone your forked repository to your local machine using:
 
    ```bash
-   git clone https://github.com//HybridConvViT.git
+   git clone https://github.com//ChromaFusion.git
    ```
 
 3. **Create a New Branch**: Create a new branch for your feature or bug fix:
@@ -134,7 +134,7 @@ By participating in this project, you agree to abide by our [Code of Conduct](CO
 
 We value your feedback! Feel free to suggest improvements or share your thoughts on the project's direction.
 
-Thank you for contributing to HybridConvViT. Your efforts help make this project better for everyone!
+Thank you for contributing to ChromaFusion. Your efforts help make this project better for everyone!
 
 ## License
 
