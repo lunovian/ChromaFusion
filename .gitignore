@@ -8,3 +8,4 @@ experiments/logs/
 .ipynb_checkpoints/
 /src/data/stl10
 .7z
+*.7z
