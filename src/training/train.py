@@ -1,7 +1,7 @@
 import os
 import torch
 from torch.utils.data import DataLoader
-from models.hybrid_colorizer import HybridColorize
+from src.models.chroma_fusion import HybridColorize
 from data.dataset import HybridConvViTDataset
 from data.augmentations import get_augmentations
 from data.utils import show_image

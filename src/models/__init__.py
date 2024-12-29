@@ -1,8 +1,8 @@
 from .bottleneck import Bottleneck
-from .coca_encoder import CocaEncoder
+from .efficient_net import CocaEncoder
 from .decoder import Decoder
 from .hint_integration import HintIntegration
-from .hybrid_colorizer import HybridColorize
+from .chroma_fusion import HybridColorize
 
 __all__ = [
     'Bottleneck',
