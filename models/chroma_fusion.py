@@ -5,9 +5,9 @@ from .bottleneck import Bottleneck
 from .decoder import Decoder
 from .vit import ViT
 
-class HybridColorize(nn.Module):
+class ChromeFusion(nn.Module):
     def __init__(self, config):
-        super(HybridColorize, self).__init__()
+        super(ChromeFusion, self).__init__()
         self.cnn_encoder = EfficientNetEncoder(
             model_name=config['efficientnet_model_name'],
             pretrained=config['pretrained']
