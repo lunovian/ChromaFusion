@@ -6,7 +6,7 @@ from torch.utils.data import Dataset
 import torchvision.transforms as transforms
 from skimage.color import rgb2lab, lab2rgb
 
-class TorchDataset(Dataset):
+class DataLoader(Dataset):
     def __init__(self, root_dir, dataset_type, transform=None):
         self.root_dir = root_dir
         self.dataset_type = dataset_type

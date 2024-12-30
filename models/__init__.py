@@ -1,13 +1,11 @@
 from .bottleneck import Bottleneck
-from .efficient_net import CocaEncoder
+from .efficient_net import EfficientNetEncoder
 from .decoder import Decoder
-from .hint_integration import HintIntegration
-from .chroma_fusion import HybridColorize
+from .chroma_fusion import ChromaFusion
 
 __all__ = [
     'Bottleneck',
-    'CocaEncoder',
     'Decoder',
-    'HintIntegration',
-    'HybridColorize'
+    'EfficientNetEncoder',
+    'ChromaFusion'
 ]

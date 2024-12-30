@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-import timm
+
 class Decoder(nn.Module):
     def __init__(self, in_channels, out_channels):
         super(Decoder, self).__init__()

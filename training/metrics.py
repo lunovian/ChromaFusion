@@ -28,3 +28,6 @@ def calculate_metrics(original_image, colorized_image):
     ssim_value = ssim(original_image, colorized_image, win_size=win_size, data_range=1.0, channel_axis=0)
     
     return mse_value, psnr_value, ssim_value
+
+if __name__ == "__main__":
+    print(f"Metrics for random images: {calculate_metrics(np.random.rand(3, 224, 224), np.random.rand(3, 224, 224))}")

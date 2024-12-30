@@ -1,7 +1,9 @@
 import argparse
 import pytorch_lightning as pl
-import src.training.train as train
-import src.data.dataset as dataset
+from training.train import ColorizationModel
+from torchvision.datasets import Places365
+from torch.utils.data import DataLoader
+import torchvision.transforms as transforms
 
 def main(train_dir, val_dir, epochs, learning_rate, display_step, batch_size, image_size, num_train_images, num_val_images):
     config = {
@@ -14,10 +16,26 @@ def main(train_dir, val_dir, epochs, learning_rate, display_step, batch_size, im
         'bottleneck_in': 768,
         'bottleneck_out': 256,
         'decoder_out': 2,
-        'pretrained': True
+        'pretrained': True,
+        'learning_rate': learning_rate,
+        'display_step': display_step,
+        'image_size': image_size,
+        'batch_size': batch_size,
+        'num_train_images': num_train_images,
+        'num_val_images': num_val_images,
     }
 
-    data_module = Places365DataModule(data_dir=train_dir, batch_size=batch_size, num_train_images=num_train_images, num_val_images=num_val_images)
+    transform = transforms.Compose([
+        transforms.Resize((image_size, image_size)),
+        transforms.ToTensor(),
+    ])
+
+    train_dataset = Places365(root=train_dir, split='train-standard', download=True, transform=transform)
+    val_dataset = Places365(root=val_dir, split='val', download=True, transform=transform)
+
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=4)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=4)
+
     model = ColorizationModel(config)
 
     # Define early stopping and checkpoint callbacks
@@ -25,10 +43,10 @@ def main(train_dir, val_dir, epochs, learning_rate, display_step, batch_size, im
     model_checkpoint = pl.callbacks.ModelCheckpoint(dirpath='checkpoints', monitor='val_loss', mode='min', save_top_k=1)
 
     trainer = pl.Trainer(max_epochs=epochs, callbacks=[early_stopping, model_checkpoint])
-    trainer.fit(model, data_module)
+    trainer.fit(model, train_dataloaders=train_loader, val_dataloaders=val_loader)
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description='Train CWGAN on a specified dataset.')
+    parser = argparse.ArgumentParser(description='Train the colorization model on a specified dataset.')
     parser.add_argument('--train_dir', type=str, required=True, help='Path to the training data directory')
     parser.add_argument('--val_dir', type=str, required=True, help='Path to the validation data directory')
     parser.add_argument('--epochs', type=int, default=100, help='Number of training epochs')
@@ -43,5 +61,5 @@ if __name__ == "__main__":
     num_val_images = int(input("Enter the number of validating images to use (or press Enter to use all): ").strip() or 0)
 
     main(args.train_dir, args.val_dir, args.epochs, args.learning_rate, args.display_step, args.batch_size, args.image_size, 
-         num_train_images if num_train_images > 0 else None, 
+         num_train_images if num_train_images > 0 else None,
          num_val_images if num_val_images > 0 else None)

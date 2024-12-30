@@ -1,11 +1,11 @@
 import os
-import torch
-import torch.amp as amp
 import torch.optim as optim
+import torch.nn as nn
 import torch.nn.functional as F
 import pytorch_lightning as pl
 import torchvision.transforms as transforms
 from models.chroma_fusion import ChromaFusion
+from .metrics import calculate_metrics
 
 def augmentations():
     train_transforms = transforms.Compose([
@@ -89,6 +89,7 @@ class ColorizationModel(pl.LightningModule):
         output = F.interpolate(output, size=AB.shape[2:], mode='bilinear', align_corners=False)
         loss = self.criterion(output, AB)
         self.log('train_loss', loss)
+        self.log('train_batch_idx', batch_idx)
         return loss
 
     def validation_step(self, batch, batch_idx):
@@ -97,6 +98,7 @@ class ColorizationModel(pl.LightningModule):
         output = F.interpolate(output, size=AB.shape[2:], mode='bilinear', align_corners=False)
         val_loss = self.criterion(output, AB)
         self.log('val_loss', val_loss)
+        self.log('val_batch_idx', batch_idx)
 
         output_np = output.cpu().numpy()
         AB_np = AB.cpu().numpy()
@@ -113,7 +115,7 @@ class ColorizationModel(pl.LightningModule):
         self.log('val_ssim', val_ssim / len(batch))
 
     def configure_optimizers(self):
-        optimizer = optim.Adam(self.model.parameters(), lr=1e-4)
+        optimizer = optim.Adam(self.model.parameters(), lr=self.config['learning_rate'])
         scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.1, patience=3)
         return {
             'optimizer': optimizer,
