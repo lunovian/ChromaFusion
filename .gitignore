@@ -9,3 +9,6 @@ experiments/logs/
 /src/data/stl10
 *.7z
 /data/places365
+/experiments/output
+/output/logs
+/output
