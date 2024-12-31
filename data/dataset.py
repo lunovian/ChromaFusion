@@ -1,64 +1,92 @@
 import os
 import torch
 import numpy as np
+import random
 from PIL import Image
 from torch.utils.data import Dataset
-import torchvision.transforms as transforms
-from skimage.color import rgb2lab, lab2rgb
+from torchvision import transforms
+from skimage.color import rgb2lab
+import torch.amp as amp  # Add this import
 
-class DataLoader(Dataset):
-    def __init__(self, root_dir, dataset_type, transform=None):
-        self.root_dir = root_dir
-        self.dataset_type = dataset_type
+class CFDataLoader(Dataset):
+    def __init__(self, data_dir, transform=None, max_samples=None):
+        if not os.path.exists(data_dir):
+            raise ValueError(f"Directory not found: {data_dir}")
+            
+        self.data_dir = data_dir
         self.transform = transform
-        self.data = self._load_data()
-
-    def _load_data(self):
-        # Construct paths based on the dataset type (train/val)
-        grayscale_path = os.path.join(self.root_dir, 'grayscale')
-        color_path = os.path.join(self.root_dir, 'original')
-
-        if not os.path.exists(grayscale_path) or not os.path.exists(color_path):
-            raise FileNotFoundError(f"Could not find directories: {grayscale_path} or {color_path}")
-
-        data = []
-        for filename in os.listdir(grayscale_path):
-            grayscale_img_path = os.path.join(grayscale_path, filename)
-            color_img_path = os.path.join(color_path, filename)
-            if os.path.exists(grayscale_img_path) and os.path.exists(color_img_path):
-                data.append((grayscale_img_path, color_img_path))
+        self.image_files = []
+        
+        # Get all image files recursively from all subdirectories
+        valid_extensions = ('.png', '.jpg', '.jpeg', '.PNG', '.JPG', '.JPEG')
+        category_count = 0
+        
+        print(f"Scanning directory: {data_dir}")
+        
+        self.cache_file = os.path.join(data_dir, 'dataset_cache.txt')
+        if os.path.exists(self.cache_file):
+            with open(self.cache_file, 'r') as f:
+                self.image_files = f.read().splitlines()
+        else:
+            for root, dirs, files in os.walk(data_dir):
+                if root == data_dir:
+                    print(f"Found {len(dirs)} categories")
+                    category_count = len(dirs)
+                    
+                valid_images = [os.path.join(root, f) for f in files if f.lower().endswith(valid_extensions)]
+                if valid_images:
+                    self.image_files.extend(valid_images)
+                    if root != data_dir:
+                        print(f"  Found {len(valid_images)} images in {os.path.basename(root)}")
+            
+            if len(self.image_files) == 0:
+                raise ValueError(f"No valid images found in directory: {data_dir}")
+                
+            print(f"Total: Found {len(self.image_files)} images across {category_count} categories")
+            
+            # Apply max_samples limit before caching
+            if max_samples and max_samples > 0:
+                print(f"Limiting dataset to {max_samples} samples")
+                # Shuffle files before limiting to get random subset
+                random.shuffle(self.image_files)
+                self.image_files = self.image_files[:max_samples]
+                print(f"Final dataset size: {len(self.image_files)}")
+            
+            # Cache the limited dataset
+            self.cache_file = os.path.join(data_dir, f'dataset_cache_{max_samples if max_samples else "full"}.txt')
+            if os.path.exists(self.cache_file):
+                with open(self.cache_file, 'r') as f:
+                    self.image_files = f.read().splitlines()
             else:
-                print(f"Missing pair for {filename}")
-        return data
+                with open(self.cache_file, 'w') as f:
+                    f.write('\n'.join(self.image_files))
+        
+        self.to_tensor = transforms.ToTensor()
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        print(f"Dataset using device: {self.device}")
 
     def __len__(self):
-        return len(self.data)
+        return len(self.image_files)
 
+    @amp.autocast(device_type='cuda' if torch.cuda.is_available() else 'cpu')
     def __getitem__(self, idx):
-        if torch.is_tensor(idx):
-            idx = idx.tolist()
-
-        grayscale_img_path, color_img_path = self.data[idx]
-        grayscale_img = self._load_image(grayscale_img_path)
-        color_img = self._load_image(color_img_path)
-
-        if self.transform:
-            # Apply transforms to both grayscale and color images
-            grayscale_img = self.transform(grayscale_img)
-            color_img = self.transform(color_img)
-
-        # Convert the transformed color image to numpy array and ensure the shape is (height, width, 3)
-        color_img_np = np.array(color_img.permute(1, 2, 0))  # Convert from (C, H, W) to (H, W, C)
-
-        # Convert RGB color image to LAB
-        lab = rgb2lab(color_img_np)
-        L = lab[:, :, 0] / 50.0 - 1.0  # Normalize L channel to [-1, 1]
-        AB = lab[:, :, 1:] / 128.0  # Normalize AB channels to [-1, 1]
-
-        L = torch.tensor(L).unsqueeze(0).float()  # Add channel dimension and convert to tensor
-        AB = torch.tensor(AB).permute(2, 0, 1).float()  # Convert to tensor and permute dimensions
-
-        return L, AB
-
-    def _load_image(self, img_path):
-        return Image.open(img_path).convert('RGB')  # Load image as RGB
+        img_path = self.image_files[idx]
+        try:
+            img = Image.open(img_path).convert('RGB')
+            if self.transform:
+                img = self.transform(img)
+            else:
+                img = self.to_tensor(img)
+                
+            # Optimize LAB conversion
+            img_np = img.permute(1, 2, 0).numpy()
+            lab_img = rgb2lab(img_np)
+            
+            L = torch.from_numpy(lab_img[:, :, 0]).unsqueeze(0) / 50.0 - 1.0
+            ab = torch.from_numpy(lab_img[:, :, 1:]).permute(2, 0, 1) / 128.0
+            
+            return {'L': L.float(), 'ab': ab.float()}
+        except Exception as e:
+            print(f"Error loading image {img_path}: {str(e)}")
+            # Return a random valid index instead
+            return self.__getitem__(random.randint(0, len(self) - 1))

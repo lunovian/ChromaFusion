@@ -1,5 +1,3 @@
-from .dataset import DataLoader
+from .dataset import CFDataLoader  # Import the correct class name
 
-__all__ = [
-    'DataLoader'
-]
+__all__ = ['CFDataLoader']
