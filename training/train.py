@@ -1,11 +1,32 @@
 import os
+import torch
 import torch.optim as optim
 import torch.nn as nn
 import torch.nn.functional as F
 import pytorch_lightning as pl
 import torchvision.transforms as transforms
+import torch.optim.lr_scheduler as lr_scheduler
 from models.chroma_fusion import ChromaFusion
 from .metrics import calculate_metrics
+import torch.amp as amp  # Add this import
+
+class SaveImageCallback(pl.Callback):
+    """Callback for saving images during training"""
+    def __init__(self, output_dir, save_frequency):
+        super().__init__()
+        self.output_dir = output_dir
+        self.save_frequency = save_frequency
+
+    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
+        if batch_idx % self.save_frequency == 0:
+            L = batch['L']
+            ab_true = batch['ab']
+            ab_pred = pl_module(L)
+            
+            prefix = f"epoch_{trainer.current_epoch}_batch_{batch_idx}"
+            save_image(L, f'{self.output_dir}/{prefix}_gray.png')
+            save_image(ab_pred, f'{self.output_dir}/{prefix}_pred.png')
+            save_image(ab_true, f'{self.output_dir}/{prefix}_true.png')
 
 def augmentations():
     train_transforms = transforms.Compose([
@@ -74,53 +95,135 @@ def check_required_folders(base_dir):
 
 class ColorizationModel(pl.LightningModule):
     def __init__(self, config):
-        super(ColorizationModel, self).__init__()
-        self.config = config
-        self.model = ChromaFusion(config)
-        self.criterion = nn.MSELoss()
+        super().__init__()
         self.save_hyperparameters()
+        self.model = ChromaFusion(config)
+        self.criterion = nn.SmoothL1Loss()
+        
+        # Fix GradScaler initialization
+        self.scaler = torch.amp.GradScaler(
+            enabled=(torch.cuda.is_available() and config.get('precision', 32) == 16)
+        )  # Remove device_type parameter
+        
+        # Training parameters
+        self.warmup_epochs = 5
+        self.base_lr = config['learning_rate']
+        self.min_lr = self.base_lr * 0.001
+        self.clip_grad_val = config.get('gradient_clip_val', 1.0)
 
     def forward(self, x):
         return self.model(x)
 
     def training_step(self, batch, batch_idx):
-        L, AB = batch
-        output = self.model(L)
-        output = F.interpolate(output, size=AB.shape[2:], mode='bilinear', align_corners=False)
-        loss = self.criterion(output, AB)
-        self.log('train_loss', loss)
-        self.log('train_batch_idx', batch_idx)
+        L = batch['L']
+        ab = batch['ab']
+        
+        # Ensure inputs require gradients
+        L = L.float().requires_grad_()
+        ab = ab.float().requires_grad_()
+        
+        # Ensure input is float tensor and in valid range
+        L = torch.clamp(L.float(), min=-1.0, max=1.0)
+        ab = torch.clamp(ab.float(), min=-1.0, max=1.0)
+        
+        # Check for NaN inputs
+        if torch.isnan(L).any() or torch.isnan(ab).any():
+            raise ValueError("NaN detected in input tensors")
+        
+        with amp.autocast(device_type='cuda' if torch.cuda.is_available() else 'cpu'):
+            pred_ab = self.model(L)
+            loss = self.criterion(pred_ab, ab)
+        
+        # Check for NaN loss
+        if torch.isnan(loss):
+            raise ValueError("NaN loss detected")
+        
+        # Log metrics
+        self.log('train_loss', loss, prog_bar=True)
+        current_lr = self.optimizers().param_groups[0]['lr']
+        self.log('lr', current_lr, prog_bar=True)
+        
         return loss
 
     def validation_step(self, batch, batch_idx):
-        L, AB = batch
-        output = self.model(L)
-        output = F.interpolate(output, size=AB.shape[2:], mode='bilinear', align_corners=False)
-        val_loss = self.criterion(output, AB)
-        self.log('val_loss', val_loss)
-        self.log('val_batch_idx', batch_idx)
-
-        output_np = output.cpu().numpy()
-        AB_np = AB.cpu().numpy()
-
-        val_mse, val_psnr, val_ssim = 0, 0, 0
-        for i in range(output_np.shape[0]):
-            mse_value, psnr_value, ssim_value = calculate_metrics(AB_np[i], output_np[i])
-            val_mse += mse_value
-            val_psnr += psnr_value
-            val_ssim += ssim_value
-
-        self.log('val_mse', val_mse / len(batch))
-        self.log('val_psnr', val_psnr / len(batch))
-        self.log('val_ssim', val_ssim / len(batch))
+        L = batch['L']
+        ab = batch['ab']
+        
+        # Ensure inputs require gradients even in validation
+        L = L.float().requires_grad_()
+        ab = ab.float().requires_grad_()
+        
+        # Ensure input is float tensor
+        L = L.float()
+        ab = ab.float()
+        
+        pred_ab = self.model(L)
+        loss = self.criterion(pred_ab, ab)
+        
+        self.log('val_loss', loss, prog_bar=True)
+        return loss
 
     def configure_optimizers(self):
-        optimizer = optim.Adam(self.model.parameters(), lr=self.config['learning_rate'])
-        scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.1, patience=3)
-        return {
-            'optimizer': optimizer,
-            'lr_scheduler': {
-                'scheduler': scheduler,
-                'monitor': 'val_loss'
-            }
+        optimizer = torch.optim.AdamW(
+            self.parameters(),
+            lr=self.base_lr,
+            betas=(0.9, 0.999),
+            eps=1e-8,
+            weight_decay=0.01
+        )
+        
+        # Learning rate scheduler with warmup
+        scheduler = {
+            'scheduler': lr_scheduler.OneCycleLR(
+                optimizer,
+                max_lr=self.base_lr,
+                total_steps=self.trainer.estimated_stepping_batches,
+                pct_start=0.1,  # Warmup period
+                div_factor=25.0,  # Initial learning rate = max_lr/25
+                final_div_factor=1000.0,  # Min learning rate = max_lr/1000
+            ),
+            'interval': 'step',
+            'frequency': 1
         }
+        
+        return [optimizer], [scheduler]
+
+    def optimizer_step(self, *args, **kwargs):
+        # Clip gradients
+        torch.nn.utils.clip_grad_norm_(self.parameters(), self.clip_grad_val)
+        super().optimizer_step(*args, **kwargs)
+
+def main(args):
+    # ...existing setup code...
+
+    # Update callbacks list with proper SaveImageCallback
+    callbacks = [
+        pl.callbacks.EarlyStopping(
+            monitor='val_loss',
+            patience=args.early_stopping_patience,
+            mode='min'
+        ),
+        pl.callbacks.ModelCheckpoint(
+            dirpath=os.path.join(args.output_dir, 'checkpoints'),
+            filename='colorization-{epoch:02d}-{val_loss:.2f}',
+            monitor='val_loss',
+            mode='min',
+            save_top_k=3,
+            save_last=True
+        ),
+        LearningRateMonitor(logging_interval='epoch'),
+        DetailedProgressBar()
+    ]
+
+    # Add image saving callback if requested
+    if args.save_images:
+        callbacks.append(SaveImageCallback(args.output_dir, args.save_frequency))
+
+    # Updated Trainer configuration
+    trainer = pl.Trainer(
+        max_epochs=args.epochs,
+        callbacks=callbacks,
+        # ...rest of existing trainer config...
+    )
+
+    # ...rest of existing code...
