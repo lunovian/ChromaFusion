@@ -16,3 +16,4 @@ wandb
 torch_fidelity
 opencv-python
 pytorch_fid
+tensorboard
