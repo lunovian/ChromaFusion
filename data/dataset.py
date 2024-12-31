@@ -9,7 +9,7 @@ from skimage.color import rgb2lab
 import torch.amp as amp  # Add this import
 
 class CFDataLoader(Dataset):
-    def __init__(self, data_dir, transform=None, max_samples=None):
+    def __init__(self, data_dir, transform=None, max_samples=None, dataset_type="unknown"):
         if not os.path.exists(data_dir):
             raise ValueError(f"Directory not found: {data_dir}")
             
@@ -44,16 +44,23 @@ class CFDataLoader(Dataset):
                 
             print(f"Total: Found {len(self.image_files)} images across {category_count} categories")
             
+            print(f"\nProcessing {dataset_type} dataset:")
+            total_files = len(self.image_files)
+            print(f"Found {total_files} total images")
+            
             # Apply max_samples limit before caching
             if max_samples and max_samples > 0:
+                if max_samples > total_files:
+                    print(f"Warning: Requested {max_samples} images but only {total_files} available")
+                    max_samples = total_files
                 print(f"Limiting dataset to {max_samples} samples")
                 # Shuffle files before limiting to get random subset
                 random.shuffle(self.image_files)
                 self.image_files = self.image_files[:max_samples]
-                print(f"Final dataset size: {len(self.image_files)}")
+                print(f"Final {dataset_type} dataset size: {len(self.image_files)} images")
             
             # Cache the limited dataset
-            self.cache_file = os.path.join(data_dir, f'dataset_cache_{max_samples if max_samples else "full"}.txt')
+            self.cache_file = os.path.join(data_dir, f'dataset_cache_{dataset_type}_{max_samples if max_samples else "full"}.txt')
             if os.path.exists(self.cache_file):
                 with open(self.cache_file, 'r') as f:
                     self.image_files = f.read().splitlines()
