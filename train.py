@@ -163,18 +163,46 @@ def main(args):
     if args.num_val_images > 0:
         print(f"Limiting validation dataset to {args.num_val_images} images")
 
-    # Initialize datasets with enforced size limits
+    # Initialize datasets with size validation
     train_dataset = CFDataLoader(
         data_dir=args.train_dir,
         transform=train_transform,
-        max_samples=args.num_train_images if args.num_train_images > 0 else None
+        max_samples=args.num_train_images,
+        dataset_type="train"
     )
 
     val_dataset = CFDataLoader(
         data_dir=args.val_dir,
         transform=val_transform,
-        max_samples=args.num_val_images if args.num_val_images > 0 else None
+        max_samples=args.num_val_images,
+        dataset_type="validation"
     )
+
+    # Verify final dataset sizes
+    train_size = len(train_dataset)
+    val_size = len(val_dataset)
+    
+    print("\nDataset Summary:")
+    print(f"Training images: {train_size:,}")
+    print(f"Validation images: {val_size:,}")
+    
+    # Validate dataset sizes
+    min_train_images = 100  # Minimum recommended training images
+    min_val_images = 10     # Minimum recommended validation images
+    
+    if train_size < min_train_images:
+        print(f"\nWarning: Training dataset size ({train_size}) is smaller than recommended minimum ({min_train_images})")
+    if val_size < min_val_images:
+        print(f"Warning: Validation dataset size ({val_size}) is smaller than recommended minimum ({min_val_images})")
+    
+    # Calculate and display ratio
+    val_ratio = val_size / train_size if train_size > 0 else 0
+    print(f"Validation/Training ratio: {val_ratio:.2%}")
+    
+    if val_ratio > 0.3:
+        print("Warning: Validation set might be too large compared to training set")
+    elif val_ratio < 0.1:
+        print("Warning: Validation set might be too small compared to training set")
 
     # Verify dataset sizes
     actual_train_size = len(train_dataset)
