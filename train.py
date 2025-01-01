@@ -1,21 +1,26 @@
 import argparse
 import os
 import sys
+import numpy as np
 import pytorch_lightning as pl
 from pytorch_lightning.loggers import TensorBoardLogger, CSVLogger
-from training.train import ColorizationModel
 from torch.utils.data import DataLoader
 from data.dataset import CFDataLoader  # Import CFDataLoader directly
 import torchvision.transforms as transforms
-from pytorch_lightning.callbacks import LearningRateMonitor, ProgressBar
+from pytorch_lightning.callbacks import LearningRateMonitor, ProgressBar, TQDMProgressBar
 import torch
 import torch.cuda
-from training.callbacks import DetailedProgressBar
+import torch.nn as nn
+import torch.optim.lr_scheduler as lr_scheduler
+import torch.amp as amp
+from models.chroma_fusion import ChromaFusion
 import multiprocessing
 import matplotlib.pyplot as plt
-from skimage.metrics import peak_signal_noise_ratio as psnr
-from skimage.metrics import structural_similarity as ssim
 from torchvision.utils import save_image
+from training import (
+    calculate_metrics,
+    ColorizeVisualizationCallback
+)
 
 # Add Tensor Cores optimization
 if torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 7:
@@ -51,24 +56,32 @@ def save_results(model, batch, output_dir, batch_idx, is_train=True):
     save_image(ab_true, f'{output_dir}/{prefix}_true_{batch_idx}.png')
 
 def evaluate_model(model, test_loader, device):
+    """Evaluate model on test dataset with proper device handling."""
     model.eval()
-    metrics = {'psnr': [], 'ssim': []}
+    model = model.to(device)  # Ensure model is on correct device
+    metrics_sum = {'mse': 0, 'psnr': 0, 'ssim': 0}
+    batch_count = 0
     
     with torch.no_grad():
         for batch in test_loader:
+            # Move batch to device
             L = batch['L'].to(device)
             ab_true = batch['ab'].to(device)
-            ab_pred = model(L)
             
-            # Calculate metrics
-            ab_true_np = ab_true.cpu().numpy()
-            ab_pred_np = ab_pred.cpu().numpy()
+            # Forward pass
+            with torch.amp.autocast(enabled=device.type == 'cuda'):
+                ab_pred = model(L)
             
-            for i in range(len(ab_true_np)):
-                metrics['psnr'].append(psnr(ab_true_np[i], ab_pred_np[i], data_range=2.0))
-                metrics['ssim'].append(ssim(ab_true_np[i], ab_pred_np[i], data_range=2.0, channel_axis=0))
+            # Calculate metrics using imported calculate_metrics
+            batch_metrics = calculate_metrics(ab_pred, ab_true)
+            
+            # Accumulate metrics
+            for k in metrics_sum.keys():
+                metrics_sum[k] += batch_metrics[k]
+            batch_count += 1
     
-    return {k: np.mean(v) for k, v in metrics.items()}
+    # Calculate averages
+    return {k: v / batch_count for k, v in metrics_sum.items()}
 
 class ImageSavingCallback(pl.Callback):
     def __init__(self, output_dir, save_frequency):
@@ -90,6 +103,107 @@ class ImageSavingCallback(pl.Callback):
                     save_image(L[i:i+1], f'{self.output_dir}/{prefix}_gray.png')
                     save_image(ab_pred[i:i+1], f'{self.output_dir}/{prefix}_pred.png')
                     save_image(ab_true[i:i+1], f'{self.output_dir}/{prefix}_true.png')
+
+# Move ColorizationModel class here from training/train.py
+class ColorizationModel(pl.LightningModule):
+    def __init__(self, config):
+        super().__init__()
+        self.save_hyperparameters()
+        # Remove the device assignment since LightningModule handles this
+        self.model = ChromaFusion(config)
+        self.criterion = nn.SmoothL1Loss()
+        self.scaler = torch.amp.GradScaler(
+            enabled=(torch.cuda.is_available() and config.get('precision', 32) == 16)
+        )
+        
+        # Training parameters
+        self.warmup_epochs = 5
+        self.base_lr = config['learning_rate']
+        self.min_lr = self.base_lr * 0.001
+        self.clip_grad_val = config.get('gradient_clip_val', 1.0)
+
+    def forward(self, x):
+        return self.model(x)
+
+    def training_step(self, batch, batch_idx):
+        L = batch['L'].to(self.device)
+        ab = batch['ab'].to(self.device)
+        
+        L = torch.clamp(L.float(), min=-1.0, max=1.0)
+        ab = torch.clamp(ab.float(), min=-1.0, max=1.0)
+        
+        with amp.autocast(device_type='cuda' if torch.cuda.is_available() else 'cpu'):
+            pred_ab = self.model(L)
+            loss = self.criterion(pred_ab, ab)
+        
+        self.log('train_loss', loss, prog_bar=True)
+        current_lr = self.optimizers().param_groups[0]['lr']
+        self.log('lr', current_lr, prog_bar=True)
+        
+        return loss
+
+    def validation_step(self, batch, batch_idx):
+        L = batch['L'].to(self.device)
+        ab = batch['ab'].to(self.device)
+        
+        with torch.no_grad():
+            pred_ab = self.model(L)
+            metrics = calculate_metrics(pred_ab, ab)
+        
+        self.log('val_loss', metrics['mse'], prog_bar=True)
+        self.log('val_psnr', metrics['psnr'], prog_bar=True)
+        self.log('val_ssim', metrics['ssim'], prog_bar=True)
+        
+        return metrics['mse']
+
+    def configure_optimizers(self):
+        optimizer = torch.optim.AdamW(
+            self.parameters(),
+            lr=self.base_lr,
+            betas=(0.9, 0.999),
+            eps=1e-8,
+            weight_decay=0.01
+        )
+        
+        scheduler = {
+            'scheduler': lr_scheduler.OneCycleLR(
+                optimizer,
+                max_lr=self.base_lr,
+                total_steps=self.trainer.estimated_stepping_batches,
+                pct_start=0.1,
+                div_factor=25.0,
+                final_div_factor=1000.0,
+            ),
+            'interval': 'step',
+            'frequency': 1
+        }
+        
+        return [optimizer], [scheduler]
+
+    def optimizer_step(self, *args, **kwargs):
+        torch.nn.utils.clip_grad_norm_(self.parameters(), self.clip_grad_val)
+        super().optimizer_step(*args, **kwargs)
+
+class DetailedProgressBar(TQDMProgressBar):
+    def __init__(self):
+        super().__init__()
+        self.enable = True
+
+    def get_metrics(self, trainer, model):
+        items = super().get_metrics(trainer, model)
+        if trainer.training:
+            if 'loss' in trainer.callback_metrics:
+                items["loss"] = f"{trainer.callback_metrics['loss']:.3f}"
+            if 'lr' in trainer.callback_metrics:
+                items["lr"] = f"{trainer.callback_metrics['lr']:.2e}"
+        elif trainer.validating:
+            if 'val_loss' in trainer.callback_metrics:
+                items["val_loss"] = f"{trainer.callback_metrics['val_loss']:.3f}"
+        return items
+
+    def on_train_epoch_start(self, trainer, *args, **kwargs):
+        super().on_train_epoch_start(trainer, *args, **kwargs)
+        print(f"\nEpoch {trainer.current_epoch}")
 
 def main(args):
     # Add CUDA detection and device setup
@@ -274,7 +388,12 @@ def main(args):
             save_last=True
         ),
         LearningRateMonitor(logging_interval='epoch'),
-        DetailedProgressBar()  # Replace default progress bar with detailed one
+        DetailedProgressBar(),  # Replace default progress bar with detailed one
+        ColorizeVisualizationCallback(
+            output_dir=args.output_dir,
+            num_samples=3,
+            save_freq=args.visualization_frequency
+        )
     ]
 
     # Add image saving callback if requested
@@ -323,6 +442,9 @@ def main(args):
     # Evaluation phase if requested
     if args.evaluate:
         print("\nRunning evaluation...")
+        # Ensure model is in eval mode and on correct device
+        model.eval()
+        model = model.to(device)
         metrics = evaluate_model(model, val_loader, device)
         print(f"Evaluation Results:")
         print(f"PSNR: {metrics['psnr']:.2f}")
@@ -353,6 +475,8 @@ if __name__ == "__main__":
     parser.add_argument('--save_images', action='store_true', help='Save generated images during training')
     parser.add_argument('--save_frequency', type=int, default=100, help='How often to save images')
     parser.add_argument('--evaluate', action='store_true', help='Run evaluation after training')
+    parser.add_argument('--visualization_frequency', type=int, default=1,
+                       help='Frequency of saving visualization images (epochs)')
 
     args = parser.parse_args()
     

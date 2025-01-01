@@ -11,12 +11,9 @@ from .vit import ViT
 class ChromaFusion(nn.Module):
     def __init__(self, config):
         super(ChromaFusion, self).__init__()
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         
-        # Input normalization layer
+        # Create components
         self.input_norm = nn.BatchNorm2d(1)
-        
-        # Improved input adapter
         self.input_adapter = nn.Sequential(
             nn.Conv2d(1, 3, kernel_size=1, bias=False),
             nn.BatchNorm2d(3),
@@ -48,6 +45,10 @@ class ChromaFusion(nn.Module):
 
         # Initialize weights properly
         self._init_weights()
+        
+        # Move everything to device at once
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.to(self.device)
     
     def _init_weights(self):
         for m in self.modules():
@@ -61,8 +62,10 @@ class ChromaFusion(nn.Module):
 
     @amp.autocast(device_type='cuda' if torch.cuda.is_available() else 'cpu')
     def forward(self, x):
-        # Input checks and normalization
+        # Move input to same device as model
         x = x.to(self.device)
+        
+        # Input checks and normalization
         if x.isnan().any():
             raise ValueError("Input contains NaN values")
             

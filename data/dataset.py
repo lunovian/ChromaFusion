@@ -10,64 +10,66 @@ import torch.amp as amp  # Add this import
 
 class CFDataLoader(Dataset):
     def __init__(self, data_dir, transform=None, max_samples=None, dataset_type="unknown"):
-        if not os.path.exists(data_dir):
-            raise ValueError(f"Directory not found: {data_dir}")
-            
         self.data_dir = data_dir
         self.transform = transform
+        self.max_samples = max_samples
+        self.dataset_type = dataset_type
         self.image_files = []
-        
-        # Get all image files recursively from all subdirectories
-        valid_extensions = ('.png', '.jpg', '.jpeg', '.PNG', '.JPG', '.JPEG')
-        category_count = 0
-        
-        print(f"Scanning directory: {data_dir}")
-        
-        self.cache_file = os.path.join(data_dir, 'dataset_cache.txt')
+
+        # Create a unique cache filename that includes the size limit
+        cache_name = f'dataset_cache_{dataset_type}_{max_samples}_files.txt'
+        self.cache_file = os.path.join(data_dir, cache_name)
+
         if os.path.exists(self.cache_file):
+            # Load from cache if it exists
+            print(f"Loading {dataset_type} dataset from cache...")
             with open(self.cache_file, 'r') as f:
-                self.image_files = f.read().splitlines()
+                self.image_files = [line.strip() for line in f.readlines()]
         else:
-            for root, dirs, files in os.walk(data_dir):
-                if root == data_dir:
-                    print(f"Found {len(dirs)} categories")
-                    category_count = len(dirs)
-                    
-                valid_images = [os.path.join(root, f) for f in files if f.lower().endswith(valid_extensions)]
-                if valid_images:
-                    self.image_files.extend(valid_images)
-                    if root != data_dir:
-                        print(f"  Found {len(valid_images)} images in {os.path.basename(root)}")
-            
-            if len(self.image_files) == 0:
-                raise ValueError(f"No valid images found in directory: {data_dir}")
-                
-            print(f"Total: Found {len(self.image_files)} images across {category_count} categories")
-            
-            print(f"\nProcessing {dataset_type} dataset:")
-            total_files = len(self.image_files)
-            print(f"Found {total_files} total images")
-            
-            # Apply max_samples limit before caching
-            if max_samples and max_samples > 0:
-                if max_samples > total_files:
-                    print(f"Warning: Requested {max_samples} images but only {total_files} available")
-                    max_samples = total_files
-                print(f"Limiting dataset to {max_samples} samples")
-                # Shuffle files before limiting to get random subset
+            # Collect files and create cache
+            print(f"Scanning {dataset_type} directory: {data_dir}")
+            self._collect_files()
+            self._create_cache()
+
+        # Verify and apply size limit
+        total_files = len(self.image_files)
+        if max_samples and max_samples > 0:
+            if max_samples < total_files:
+                print(f"\nLimiting {dataset_type} dataset:")
+                print(f"Total available: {total_files:,} images")
+                print(f"Using random subset of {max_samples:,} images")
+                # Shuffle and limit size
+                random.seed(42)  # For reproducibility
                 random.shuffle(self.image_files)
                 self.image_files = self.image_files[:max_samples]
-                print(f"Final {dataset_type} dataset size: {len(self.image_files)} images")
-            
-            # Cache the limited dataset
-            self.cache_file = os.path.join(data_dir, f'dataset_cache_{dataset_type}_{max_samples if max_samples else "full"}.txt')
-            if os.path.exists(self.cache_file):
-                with open(self.cache_file, 'r') as f:
-                    self.image_files = f.read().splitlines()
             else:
-                with open(self.cache_file, 'w') as f:
-                    f.write('\n'.join(self.image_files))
-        
+                print(f"\nRequested {max_samples:,} images but only {total_files:,} available")
+                print(f"Using all available {total_files:,} images")
+
+        print(f"Final {dataset_type} dataset size: {len(self.image_files):,} images")
+        self.setup_device()
+
+    def _collect_files(self):
+        """Collect all valid image files recursively"""
+        valid_extensions = ('.png', '.jpg', '.jpeg', '.PNG', '.JPG', '.JPEG')
+        for root, dirs, files in os.walk(self.data_dir):
+            valid_images = [os.path.join(root, f) for f in files if f.lower().endswith(valid_extensions)]
+            if valid_images:
+                self.image_files.extend(valid_images)
+                if root != self.data_dir:
+                    print(f"  Found {len(valid_images):,} images in {os.path.basename(root)}")
+
+    def _create_cache(self):
+        """Create cache file with collected image paths"""
+        if self.image_files:
+            with open(self.cache_file, 'w') as f:
+                f.write('\n'.join(self.image_files))
+            print(f"Created cache with {len(self.image_files):,} images")
+        else:
+            raise ValueError(f"No valid images found in {self.data_dir}")
+
+    def setup_device(self):
+        """Setup device and transforms"""
         self.to_tensor = transforms.ToTensor()
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         print(f"Dataset using device: {self.device}")
@@ -85,15 +87,17 @@ class CFDataLoader(Dataset):
             else:
                 img = self.to_tensor(img)
                 
-            # Optimize LAB conversion
-            img_np = img.permute(1, 2, 0).numpy()
+            # Convert to LAB on CPU
+            img_np = img.cpu().numpy() if img.is_cuda else img.numpy()
+            img_np = img_np.transpose(1, 2, 0)
             lab_img = rgb2lab(img_np)
             
             L = torch.from_numpy(lab_img[:, :, 0]).unsqueeze(0) / 50.0 - 1.0
             ab = torch.from_numpy(lab_img[:, :, 1:]).permute(2, 0, 1) / 128.0
             
+            # Let PyTorch Lightning handle device movement
             return {'L': L.float(), 'ab': ab.float()}
+            
         except Exception as e:
             print(f"Error loading image {img_path}: {str(e)}")
-            # Return a random valid index instead
             return self.__getitem__(random.randint(0, len(self) - 1))
