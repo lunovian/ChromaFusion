@@ -7,6 +7,52 @@ import torch.nn.functional as F
 import torchvision.transforms as transforms
 from data.dataset import CFDataLoader  # Change this import
 from skimage.color import rgb2lab, lab2rgb
+import warnings
+
+def is_in_gamut(lab):
+    """Check if LAB values are within reasonable bounds"""
+    L, a, b = lab[..., 0], lab[..., 1], lab[..., 2]
+    return (L >= 0) & (L <= 100) & (a >= -127) & (a <= 127) & (b >= -127) & (b <= 127)
+
+def gamut_clip(lab):
+    """Clip LAB values to be within valid ranges"""
+    return np.clip(lab, [-0.01, -127, -127], [100.01, 127, 127])
+
+def lab_to_rgb(lab_img, clip=True):
+    """Convert LAB to RGB with gamut mapping
+    
+    Args:
+        lab_img: LAB image array of shape [..., 3]
+        clip: Whether to clip values to valid RGB range
+    """
+    # Suppress warnings during conversion
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        
+        # Clip to valid LAB ranges
+        lab_img = gamut_clip(lab_img)
+        
+        # Convert to RGB
+        rgb_img = lab2rgb(lab_img)
+        
+        if clip:
+            rgb_img = np.clip(rgb_img, 0, 1)
+            
+        return rgb_img
+
+def rgb_to_lab(rgb_img):
+    """Convert RGB to LAB with input validation
+    
+    Args:
+        rgb_img: RGB image array of shape [..., 3] in range [0, 1]
+    """
+    # Ensure input is in valid range
+    rgb_img = np.clip(rgb_img, 0, 1)
+    return rgb2lab(rgb_img)
+
+# Replace existing conversion functions with new ones
+LAB2RGB = lab_to_rgb
+RGB2LAB = rgb_to_lab
 
 def combine_lab_and_convert_to_rgb(L, AB):
     """
@@ -43,7 +89,7 @@ def combine_lab_and_convert_to_rgb(L, AB):
     LAB = np.stack((L, AB[0], AB[1]), axis=-1)
     
     # Convert LAB to RGB
-    RGB = lab2rgb(LAB)
+    RGB = LAB2RGB(LAB)
     
     # Scale RGB values to [0, 255] and convert to uint8
     RGB = (RGB * 255).astype(np.uint8)

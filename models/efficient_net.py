@@ -5,25 +5,28 @@ import timm
 class EfficientNetEncoder(nn.Module):
     def __init__(self, model_name='efficientnet_b3', pretrained=True):
         super().__init__()
-        # Filter out unused parameters during model creation
+        # Get all intermediate features and ignore/remove unused layers
         self.model = timm.create_model(
             model_name,
             pretrained=pretrained,
             features_only=True,
-            out_indices=(4,),
+            out_indices=(1,2,3,4),
             in_chans=3,
-            num_classes=0,  # Disable classifier
-            global_pool=''  # Disable global pooling
+            num_classes=0,
+            global_pool='',
+            drop_rate=0.,
+            drop_path_rate=0.
         )
         
-        # Remove unused layers
-        if hasattr(self.model, 'classifier'):
-            delattr(self.model, 'classifier')
-        if hasattr(self.model, 'conv_head'):
-            delattr(self.model, 'conv_head')
+        # Clear unused attributes
+        unused_attributes = ['bn2', 'classifier', 'conv_head']
+        for attr in unused_attributes:
+            if hasattr(self.model, attr):
+                delattr(self.model, attr)
         
         self.out_channels = self.model.feature_info.channels()[-1]
-        print(f"EfficientNet encoder initialized with {self.out_channels} output channels")
+        self.skip_channels = self.model.feature_info.channels()
+        print(f"EfficientNet encoder initialized with skip connection channels: {self.skip_channels}")
 
     def forward(self, x):
         try:
@@ -31,7 +34,7 @@ class EfficientNetEncoder(nn.Module):
                 raise ValueError(f"EfficientNet expects 3 input channels, got {x.shape[1]}")
             
             features = self.model(x)
-            return features[-1]
+            return features  # Returns list of features at different scales
         except Exception as e:
             print(f"Error in EfficientNet forward pass: {str(e)}")
             raise

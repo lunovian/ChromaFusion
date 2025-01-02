@@ -165,22 +165,45 @@ class ColorizationModel(pl.LightningModule):
             weight_decay=0.01
         )
         
+        # Calculate total steps with a safety margin
+        total_steps = self.trainer.estimated_stepping_batches
+        if hasattr(self.trainer, 'max_epochs') and hasattr(self.trainer, 'num_training_batches'):
+            # Add 10% safety margin to prevent stepping beyond total steps
+            total_steps = int(self.trainer.num_training_batches * self.trainer.max_epochs * 1.1)
+        
         scheduler = {
             'scheduler': lr_scheduler.OneCycleLR(
                 optimizer,
                 max_lr=self.base_lr,
-                total_steps=self.trainer.estimated_stepping_batches,
+                total_steps=total_steps,
                 pct_start=0.1,
                 div_factor=25.0,
                 final_div_factor=1000.0,
+                three_phase=True,  # Add three-phase for smoother transition
             ),
             'interval': 'step',
-            'frequency': 1
+            'frequency': 1,
+            'strict': False,  # Add this to prevent strict step checking
         }
         
         return [optimizer], [scheduler]
 
+    def on_train_epoch_start(self):
+        # Reset step count if needed
+        if hasattr(self, 'scheduler_step_count'):
+            current_epoch = self.trainer.current_epoch
+            expected_steps = self.trainer.num_training_batches * (current_epoch + 1)
+            if self.scheduler_step_count > expected_steps:
+                print(f"Warning: Resetting scheduler step count from {self.scheduler_step_count} to {expected_steps}")
+                self.scheduler_step_count = expected_steps
+
     def optimizer_step(self, *args, **kwargs):
+        # Track scheduler steps
+        if not hasattr(self, 'scheduler_step_count'):
+            self.scheduler_step_count = 0
+        self.scheduler_step_count += 1
+
+        # Apply gradient clipping
         torch.nn.utils.clip_grad_norm_(self.parameters(), self.clip_grad_val)
         super().optimizer_step(*args, **kwargs)
 
@@ -205,6 +228,39 @@ class DetailedProgressBar(TQDMProgressBar):
         super().on_train_epoch_start(trainer, *args, **kwargs)
         print(f"\nEpoch {trainer.current_epoch}")
 
+def get_args():
+    parser = argparse.ArgumentParser(description='Train the colorization model on a specified dataset.')
+    parser.add_argument('--train_dir', type=str, required=True, help='Path to the training data directory')
+    parser.add_argument('--val_dir', type=str, required=True, help='Path to the validation data directory')
+    parser.add_argument('--output_dir', type=str, default='output', help='Directory to save outputs')
+    parser.add_argument('--epochs', type=int, default=100, help='Number of training epochs')
+    parser.add_argument('--learning_rate', type=float, default=1e-4, help='Learning rate for the optimizer')
+    parser.add_argument('--display_step', type=int, default=1, help='Frequency of displaying images')
+    parser.add_argument('--batch_size', type=int, default=32, help='Batch size for training')
+    parser.add_argument('--image_size', type=int, default=224, help='Size of input images')
+    parser.add_argument('--num_workers', type=int, default=0, help='Number of data loading workers (0 for auto)')
+    parser.add_argument('--precision', type=int, default=32, choices=[16, 32], help='Floating point precision')
+    parser.add_argument('--gradient_clip_val', type=float, default=1.0, help='Gradient clipping value')
+    parser.add_argument('--accumulate_grad_batches', type=int, default=1, help='Gradient accumulation steps')
+    parser.add_argument('--early_stopping_patience', type=int, default=5, help='Patience for early stopping')
+    parser.add_argument('--num_train_images', type=int, default=0, help='Number of training images (0 for all)')
+    parser.add_argument('--num_val_images', type=int, default=0, help='Number of validation images (0 for all)')
+    parser.add_argument('--debug', action='store_true', help='Enable debug mode with limited dataset')
+    parser.add_argument('--limit_batches', type=float, default=0.1, help='Limit batches in debug mode')
+    parser.add_argument('--save_images', action='store_true', help='Save generated images during training')
+    parser.add_argument('--save_frequency', type=int, default=100, help='How often to save images')
+    parser.add_argument('--evaluate', action='store_true', help='Run evaluation after training')
+    parser.add_argument('--visualization_frequency', type=int, default=1,
+                       help='Frequency of saving visualization images (epochs)')
+    parser.add_argument('--resume', type=str, default=None,
+                       help='Path to checkpoint to resume from (e.g. output/checkpoints/final_model.ckpt)')
+    parser.add_argument('--start_epoch', type=int, default=None,
+                       help='Epoch to start from when resuming (overrides checkpoint)')
+    parser.add_argument('--reset_optimizer', action='store_true',
+                       help='Reset optimizer state when resuming training')
+    
+    return parser.parse_args()
+
 def main(args):
     # Add CUDA detection and device setup
     if torch.cuda.is_available():
@@ -222,9 +278,16 @@ def main(args):
     if not os.path.exists(args.val_dir):
         sys.exit(f"Error: Validation directory not found: {args.val_dir}")
 
-    # Create output directories
-    os.makedirs(args.output_dir, exist_ok=True)
-    os.makedirs(os.path.join(args.output_dir, 'checkpoints'), exist_ok=True)
+    # Create versioned output directory
+    version = 0
+    while os.path.exists(os.path.join(args.output_dir, f'version_{version}')):
+        version += 1
+    version_dir = os.path.join(args.output_dir, f'version_{version}')
+    checkpoint_dir = os.path.join(version_dir, 'checkpoints')
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    
+    print(f"Output directory: {version_dir}")
+    print(f"Checkpoint directory: {checkpoint_dir}")
 
     print(f"Training directory: {args.train_dir}")
     print(f"Validation directory: {args.val_dir}")
@@ -307,7 +370,7 @@ def main(args):
     if train_size < min_train_images:
         print(f"\nWarning: Training dataset size ({train_size}) is smaller than recommended minimum ({min_train_images})")
     if val_size < min_val_images:
-        print(f"Warning: Validation dataset size ({val_size}) is smaller than recommended minimum ({min_val_images})")
+        print("Warning: Validation dataset size ({val_size}) is smaller than recommended minimum ({min_val_images})")
     
     # Calculate and display ratio
     val_ratio = val_size / train_size if train_size > 0 else 0
@@ -369,60 +432,119 @@ def main(args):
         prefetch_factor=optimal_prefetch  # Updated prefetch factor
     )
 
-    # Move model to device explicitly
-    model = ColorizationModel(config).to(device)
+    # Initialize model
+    model = ColorizationModel(config)
+    
+    # Load checkpoint if specified
+    if args.resume:
+        print(f"\nResuming from checkpoint: {args.resume}")
+        checkpoint = torch.load(args.resume, map_location=device)
+        
+        # Load model weights
+        model.load_state_dict(checkpoint['state_dict'])
+        
+        # Optionally reset optimizer state
+        if not args.reset_optimizer and 'optimizer_states' in checkpoint:
+            print("Restoring optimizer state from checkpoint")
+            model.optimizer_states = checkpoint['optimizer_states']
+        
+        # Set starting epoch
+        if args.start_epoch is not None:
+            start_epoch = args.start_epoch
+        else:
+            start_epoch = checkpoint.get('epoch', 0) + 1
+        
+        print(f"Continuing training from epoch {start_epoch}")
+    else:
+        start_epoch = 0
+    
+    # Enhanced checkpoint callback without unsupported metadata
+    checkpoint_callback = pl.callbacks.ModelCheckpoint(
+        dirpath=checkpoint_dir,
+        filename='model-{epoch:02d}-{val_loss:.4f}-{val_psnr:.2f}',
+        monitor='val_loss',
+        mode='min',
+        save_top_k=3,
+        save_last=True,
+        every_n_epochs=1,
+        save_weights_only=False,
+        auto_insert_metric_name=False,
+    )
 
-    # Callbacks
-    callbacks = [
-        pl.callbacks.EarlyStopping(
-            monitor='val_loss',
-            patience=args.early_stopping_patience,
-            mode='min'
-        ),
-        pl.callbacks.ModelCheckpoint(
-            dirpath=os.path.join(args.output_dir, 'checkpoints'),
-            filename='colorization-{epoch:02d}-{val_loss:.2f}',
-            monitor='val_loss',
-            mode='min',
-            save_top_k=3,
-            save_last=True
-        ),
-        LearningRateMonitor(logging_interval='epoch'),
-        DetailedProgressBar(),  # Replace default progress bar with detailed one
-        ColorizeVisualizationCallback(
-            output_dir=args.output_dir,
-            num_samples=3,
-            save_freq=args.visualization_frequency
-        )
-    ]
+    # Add metadata saving callback
+    class MetadataCallback(pl.Callback):
+        def __init__(self, checkpoint_dir, config):
+            super().__init__()
+            self.checkpoint_dir = checkpoint_dir
+            self.config = config
 
-    # Add image saving callback if requested
-    if args.save_images:
-        callbacks.append(ImageSavingCallback(
-            output_dir=os.path.join(args.output_dir, 'samples'),
-            save_frequency=args.save_frequency
-        ))
+        def on_save_checkpoint(self, trainer, pl_module, checkpoint):
+            metadata = {
+                'architecture': 'ChromaFusion',
+                'dataset_size': len(train_dataset),
+                'batch_size': args.batch_size,
+                'learning_rate': args.learning_rate,
+                'precision': args.precision,
+                'created_at': datetime.datetime.now().isoformat(),
+                'current_epoch': trainer.current_epoch,
+                'current_step': trainer.global_step,
+            }
+            checkpoint['metadata'] = metadata
 
-    # Logger with fallback
-    try:
-        logger = TensorBoardLogger(
-            save_dir=args.output_dir,
-            name='logs',
-            version='latest'
-        )
-        print("Using TensorBoard logger")
-    except (ImportError, ModuleNotFoundError):
-        logger = CSVLogger(
-            save_dir=args.output_dir,
-            name='logs'
-        )
-        print("TensorBoard not available, using CSV logger instead")
+    # Add a callback to save final model with metadata
+    class FinalModelCallback(pl.Callback):
+        def on_train_end(self, trainer, pl_module):
+            final_path = os.path.join(checkpoint_dir, 'final_model.ckpt')
+            metadata = {
+                'architecture': 'ChromaFusion',
+                'total_epochs': trainer.current_epoch + 1,
+                'final_val_loss': float(trainer.callback_metrics.get('val_loss', 0)),
+                'final_val_psnr': float(trainer.callback_metrics.get('val_psnr', 0)),
+                'final_val_ssim': float(trainer.callback_metrics.get('val_ssim', 0)),
+                'training_completed': datetime.datetime.now().isoformat()
+            }
+            trainer.save_checkpoint(final_path, weights_only=False)
+            
+            # Save metadata separately for easy access
+            with open(os.path.join(checkpoint_dir, 'model_metadata.json'), 'w') as f:
+                json.dump(metadata, f, indent=2)
+            
+            print(f"\nFinal model saved to: {final_path}")
+            print("Final metrics:")
+            for k, v in metadata.items():
+                if k.startswith('final_'):
+                    print(f"{k[6:]}: {v}")
 
-    # Updated Trainer configuration
+    # Update trainer initialization with both callbacks
     trainer = pl.Trainer(
-        max_epochs=args.epochs,
-        callbacks=callbacks,
-        logger=logger,
+        max_epochs=args.epochs + start_epoch,
+        callbacks=[
+            checkpoint_callback,
+            MetadataCallback(checkpoint_dir, config),
+            FinalModelCallback(),
+            pl.callbacks.EarlyStopping(
+                monitor='val_loss',
+                patience=args.early_stopping_patience,
+                mode='min',
+                min_delta=1e-4,  # Minimum improvement required
+                verbose=True
+            ),
+            # ...other existing callbacks...
+            LearningRateMonitor(logging_interval='epoch'),
+            DetailedProgressBar(),  # Replace default progress bar with detailed one
+            ColorizeVisualizationCallback(
+                output_dir=args.output_dir,
+                num_samples=3,
+                save_freq=args.visualization_frequency
+            )
+        ],
+        logger=TensorBoardLogger(
+            save_dir=version_dir,
+            name='logs',
+            version='latest',
+            default_hp_metric=False,  # Disable default hp logging
+            log_graph=True  # Log model graph
+        ),
         accelerator=accelerator,
         devices=1 if device.type == 'cuda' else None,
         precision=precision,
@@ -436,8 +558,13 @@ def main(args):
         limit_val_batches=args.limit_batches if args.debug else 1.0
     )
 
-    # Train the model
-    trainer.fit(model, train_dataloaders=train_loader, val_dataloaders=val_loader)
+    # Train the model with ckpt_path parameter
+    trainer.fit(
+        model, 
+        train_dataloaders=train_loader, 
+        val_dataloaders=val_loader,
+        ckpt_path=args.resume if not args.reset_optimizer else None
+    )
 
     # Evaluation phase if requested
     if args.evaluate:
@@ -454,30 +581,8 @@ def main(args):
     trainer.save_checkpoint(os.path.join(args.output_dir, 'checkpoints', 'final_model.ckpt'))
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description='Train the colorization model on a specified dataset.')
-    parser.add_argument('--train_dir', type=str, required=True, help='Path to the training data directory')
-    parser.add_argument('--val_dir', type=str, required=True, help='Path to the validation data directory')
-    parser.add_argument('--output_dir', type=str, default='output', help='Directory to save outputs')
-    parser.add_argument('--epochs', type=int, default=100, help='Number of training epochs')
-    parser.add_argument('--learning_rate', type=float, default=1e-4, help='Learning rate for the optimizer')
-    parser.add_argument('--display_step', type=int, default=1, help='Frequency of displaying images')
-    parser.add_argument('--batch_size', type=int, default=32, help='Batch size for training')
-    parser.add_argument('--image_size', type=int, default=224, help='Size of input images')
-    parser.add_argument('--num_workers', type=int, default=0, help='Number of data loading workers (0 for auto)')
-    parser.add_argument('--precision', type=int, default=32, choices=[16, 32], help='Floating point precision')
-    parser.add_argument('--gradient_clip_val', type=float, default=1.0, help='Gradient clipping value')
-    parser.add_argument('--accumulate_grad_batches', type=int, default=1, help='Gradient accumulation steps')
-    parser.add_argument('--early_stopping_patience', type=int, default=5, help='Patience for early stopping')
-    parser.add_argument('--num_train_images', type=int, default=0, help='Number of training images (0 for all)')
-    parser.add_argument('--num_val_images', type=int, default=0, help='Number of validation images (0 for all)')
-    parser.add_argument('--debug', action='store_true', help='Enable debug mode with limited dataset')
-    parser.add_argument('--limit_batches', type=float, default=0.1, help='Limit batches in debug mode')
-    parser.add_argument('--save_images', action='store_true', help='Save generated images during training')
-    parser.add_argument('--save_frequency', type=int, default=100, help='How often to save images')
-    parser.add_argument('--evaluate', action='store_true', help='Run evaluation after training')
-    parser.add_argument('--visualization_frequency', type=int, default=1,
-                       help='Frequency of saving visualization images (epochs)')
-
-    args = parser.parse_args()
-    
+    # Add necessary imports at the top of the file
+    import datetime
+    import json
+    args = get_args()
     main(args)

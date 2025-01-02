@@ -7,6 +7,7 @@ from .efficient_net import EfficientNetEncoder
 from .bottleneck import Bottleneck
 from .decoder import Decoder
 from .vit import ViT
+from .cbam import CBAM
 
 class ChromaFusion(nn.Module):
     def __init__(self, config):
@@ -25,6 +26,9 @@ class ChromaFusion(nn.Module):
             model_name=config['efficientnet_model_name'],
             pretrained=config['pretrained']
         )
+        
+        # Add CBAM after EfficientNet features
+        self.post_efficient_attention = CBAM(self.efficient_net_features.out_channels)
 
         # Adjust the channel adapter to match the expected input channels for the ViT
         self.channel_adapter = nn.Conv2d(self.efficient_net_features.out_channels, 3, kernel_size=1)
@@ -37,6 +41,7 @@ class ChromaFusion(nn.Module):
         )
         self.decoder = Decoder(
             in_channels=config['bottleneck_out'],
+            skip_channels=self.efficient_net_features.skip_channels,
             out_channels=config['decoder_out']
         )
 
@@ -108,12 +113,12 @@ class ChromaFusion(nn.Module):
                 raise ValueError("NaN detected after input adapter")
                 
             efficient_net_features = self.efficient_net_features(x)
-            efficient_net_features = self.layer_norm(efficient_net_features.permute(0, 2, 3, 1)).permute(0, 3, 1, 2)
+            # Apply CBAM to the last feature map
+            vit_input = efficient_net_features[-1]
+            vit_input = self.post_efficient_attention(vit_input)
+            vit_input = self.layer_norm(vit_input.permute(0, 2, 3, 1)).permute(0, 3, 1, 2)
             
-            if torch.isnan(efficient_net_features).any():
-                raise ValueError("NaN detected after EfficientNet")
-                
-            adapted_features = self.channel_adapter(efficient_net_features)
+            adapted_features = self.channel_adapter(vit_input)
             upsampled_features = self.upsample(adapted_features)
             
             # Update ViT processing with gradient checkpointing
@@ -144,10 +149,18 @@ class ChromaFusion(nn.Module):
             vit_features = vit_features.view(batch_size, 14, 14, embed_dim)
             vit_features = vit_features.permute(0, 3, 1, 2)
             bottleneck_features = self.bottleneck(vit_features)
-            output = torch.clamp(self.decoder(bottleneck_features), min=-1.0, max=1.0)
-
-            # Add final normalization
-            output = torch.tanh(output)  # Ensure output is in [-1, 1]
+            
+            # Debug print shapes (only once)
+            if not hasattr(self, '_printed_feature_shapes'):
+                print("\nFeature shapes:")
+                print(f"ViT features: {vit_features.shape}")
+                print(f"Bottleneck features: {bottleneck_features.shape}")
+                for i, feat in enumerate(efficient_net_features):
+                    print(f"EfficientNet skip {i}: {feat.shape}")
+                self._printed_feature_shapes = True
+            
+            output = self.decoder(bottleneck_features, efficient_net_features)
+            output = torch.tanh(output)
 
             return output
             
