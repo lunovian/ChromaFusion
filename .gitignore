@@ -6,6 +6,10 @@ __pycache__/
 experiments/checkpoints/
 experiments/logs/
 .ipynb_checkpoints/
-data/places365
-data/test
-output
+/src/data/stl10
+*.7z
+/data/places365
+/experiments/output
+/output/logs
+/output
+/data/test
