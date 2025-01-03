@@ -1,3 +1,5 @@
+lightning
+timm
 torch 
 torchvision 
 torchaudio
@@ -14,3 +16,5 @@ wandb
 torch_fidelity
 opencv-python
 pytorch_fid
+tensorboard
+pytest

@@ -1,199 +1,167 @@
 import argparse
-import os
-import warnings
 import torch
-import torch.nn.functional as F
-import torch.nn as nn
+import os
+from torch.utils.data import DataLoader
+from data.dataset import CFDataLoader
+import torchvision.transforms as transforms
+from train import ColorizationModel
+from tqdm import tqdm
 import numpy as np
 from skimage.metrics import peak_signal_noise_ratio as psnr
 from skimage.metrics import structural_similarity as ssim
-from skimage.color import rgb2lab, lab2rgb
-from models.cwgan import CWGAN
-from torchvision import transforms
-from torch.utils.data import DataLoader, Dataset
-from PIL import Image
-from torch_fidelity import calculate_metrics
-from scipy.stats import entropy
-from torchvision.models import inception_v3, Inception_V3_Weights
+import torch.amp as amp
+from torchvision.utils import save_image
+import matplotlib.pyplot as plt
+from pathlib import Path
+import cv2
+import numpy as np
+from utils.color_conversion import combine_lab_and_convert_to_rgb
 
-# Suppress specific PyTorch warnings
-warnings.filterwarnings("ignore", category=UserWarning, message="TypedStorage is deprecated")
+def lab_to_rgb(L, ab):
+    """Convert L and ab channels to RGB image."""
+    Lab = np.concatenate([L, ab], axis=0)  # Combine channels
+    Lab = Lab.transpose(1, 2, 0)  # Change to HWC format
+    # Convert to BGR and then RGB
+    rgb = cv2.cvtColor(Lab.astype(np.float32), cv2.COLOR_Lab2RGB)
+    return rgb
 
-class ImageDataset(Dataset):
-    def __init__(self, image_paths, transform=None):
-        self.image_paths = image_paths
-        self.transform = transform
+def save_visualization(L, ab_pred, ab_true, save_dir, idx):
+    """Save grayscale, predicted, and ground truth images."""
+    save_dir = Path(save_dir)
+    save_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Save individual images
+    save_image(L, save_dir / f'sample_{idx}_gray.png')
+    save_image(ab_pred, save_dir / f'sample_{idx}_predicted.png')
+    save_image(ab_true, save_dir / f'sample_{idx}_original.png')
+    
+    # Convert tensors to numpy arrays and ensure correct shapes
+    L_np = L[0].cpu().numpy()  # Shape: (1, H, W)
+    if L_np.shape[0] == 1:  # If we have a channel dimension
+        L_np = L_np[0]  # Remove it to get (H, W)
+    
+    ab_pred_np = ab_pred[0].cpu().numpy()  # Shape: (2, H, W)
+    ab_true_np = ab_true[0].cpu().numpy()  # Shape: (2, H, W)
+    
+    # Convert to RGB for visualization using utility function
+    rgb_pred = combine_lab_and_convert_to_rgb(L_np, ab_pred_np)
+    rgb_true = combine_lab_and_convert_to_rgb(L_np, ab_true_np)
+    
+    # Create side-by-side visualization
+    fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+    axes[0].imshow(L_np, cmap='gray')
+    axes[0].set_title('Grayscale Input')
+    axes[1].imshow(rgb_pred)
+    axes[1].set_title('Generated Color')
+    axes[2].imshow(rgb_true)
+    axes[2].set_title('Original Color')
+    
+    for ax in axes:
+        ax.axis('off')
+    
+    plt.tight_layout()
+    plt.savefig(save_dir / f'sample_{idx}_comparison.png')
+    plt.close()
 
-    def __len__(self):
-        return len(self.image_paths)
+def evaluate_model(model, test_loader, device, args):
+    model.eval()
+    metrics = {'psnr': [], 'ssim': []}
+    save_dir = os.path.join(args.output_dir, 'test_results')
+    os.makedirs(save_dir, exist_ok=True)
+    
+    with torch.no_grad(), amp.autocast(device_type='cuda' if torch.cuda.is_available() else 'cpu'):
+        for idx, batch in enumerate(tqdm(test_loader, desc="Evaluating")):
+            L = batch['L'].to(device)
+            ab_true = batch['ab'].to(device)
+            
+            # Generate predictions
+            ab_pred = model(L)
+            
+            # Save visualizations for the first N samples
+            if idx < args.num_visualizations:
+                save_visualization(
+                    L=L, 
+                    ab_pred=ab_pred, 
+                    ab_true=ab_true, 
+                    save_dir=save_dir,
+                    idx=idx
+                )
+            
+            # Calculate metrics
+            ab_true_np = ab_true.cpu().numpy()
+            ab_pred_np = ab_pred.cpu().numpy()
+            
+            # Batch processing of metrics
+            for i in range(ab_true_np.shape[0]):
+                metrics['psnr'].append(psnr(ab_true_np[i], ab_pred_np[i], data_range=2.0))
+                metrics['ssim'].append(ssim(ab_true_np[i], ab_pred_np[i], data_range=2.0, channel_axis=0))
 
-    def __getitem__(self, idx):
-        image = Image.open(self.image_paths[idx]).convert('RGB')
-        if self.transform:
-            image = self.transform(image)
-        return image
+    # Calculate average metrics
+    avg_metrics = {k: np.mean(v) for k, v in metrics.items()}
+    
+    # Save metrics to file
+    with open(os.path.join(save_dir, 'metrics.txt'), 'w') as f:
+        for k, v in avg_metrics.items():
+            f.write(f'{k}: {v:.4f}\n')
+    
+    return avg_metrics
 
-def preprocess_image(image):
-    image = image.permute(1, 2, 0).cpu().numpy()
-    lab_image = rgb2lab(image).astype(np.float32)
-    L = lab_image[:, :, 0] / 100.0
-    AB = (lab_image[:, :, 1:] / 256.0) + 0.5
-    L = torch.from_numpy(L).unsqueeze(0).unsqueeze(0)
-    AB = torch.from_numpy(AB).permute(2, 0, 1).unsqueeze(0)
-    return L, AB
+def main(args):
+    # Setup device
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    
+    # Load model
+    print(f"Loading model from {args.checkpoint_path}")
+    model = ColorizationModel.load_from_checkpoint(args.checkpoint_path)
+    model = model.to(device)
+    model.eval()
 
-def postprocess_image(L, AB):
-    L = L.squeeze(0).squeeze(0).cpu().numpy() * 100
-    AB = (AB.squeeze(0).permute(1, 2, 0).cpu().numpy() - 0.5) * 256
-    lab_image = np.zeros((L.shape[0], L.shape[1], 3))
-    lab_image[:, :, 0] = L
-    lab_image[:, :, 1:] = AB
-    rgb_image = lab2rgb(lab_image)
-    return (rgb_image * 255).astype(np.uint8)
-
-def clear_directory(directory):
-    if os.path.exists(directory):
-        for file in os.listdir(directory):
-            file_path = os.path.join(directory, file)
-            if os.path.isfile(file_path):
-                os.remove(file_path)
-            elif os.path.isdir(file_path):
-                os.rmdir(file_path)
-    os.makedirs(directory, exist_ok=True)
-
-def save_images(images, directory, prefix):
-    os.makedirs(directory, exist_ok=True)
-    for i, img in enumerate(images):
-        img = Image.fromarray(img)
-        img.save(os.path.join(directory, f"{prefix}_{i}.png"))
-
-def evaluate_metrics(real_images, fake_images):
-    # Convert images to numpy arrays
-    real_images_np = np.array(real_images).transpose((0, 3, 1, 2)) / 255.0
-    fake_images_np = np.array(fake_images).transpose((0, 3, 1, 2)) / 255.0
-
-    # Convert to torch tensors
-    real_images_torch = torch.tensor(real_images_np, dtype=torch.float32)
-    fake_images_torch = torch.tensor(fake_images_np, dtype=torch.float32)
-
-    real_dir = 'testing/real_images_temp'
-    fake_dir = 'testing/fake_images_temp'
-    clear_directory(real_dir)
-    clear_directory(fake_dir)
-
-    save_images((real_images_torch * 255).byte().permute(0, 2, 3, 1).numpy(), real_dir, 'real')
-    save_images((fake_images_torch * 255).byte().permute(0, 2, 3, 1).numpy(), fake_dir, 'fake')
-
-    fid_value = calculate_metrics(
-        input1=real_dir,
-        input2=fake_dir,
-        cuda=torch.cuda.is_available(),
-        isc=False,
-        fid=True,
-        kid=False,
-        verbose=True
-    )['frechet_inception_distance']
-
-    for f in os.listdir(real_dir):
-        os.remove(os.path.join(real_dir, f))
-    for f in os.listdir(fake_dir):
-        os.remove(os.path.join(fake_dir, f))
-    os.rmdir(real_dir)
-    os.rmdir(fake_dir)
-
-    inception_score_mean, _ = inception_score(fake_images_np)
-
-    # Setting a smaller window size for SSIM calculation and specifying data range
-    ssim_values = [ssim(real, fake, multichannel=True, win_size=3, data_range=1.0) for real, fake in zip(real_images_np, fake_images_np)]
-    psnr_values = [psnr(real, fake, data_range=1.0) for real, fake in zip(real_images_np, fake_images_np)]
-
-    return fid_value, inception_score_mean, np.mean(ssim_values), np.mean(psnr_values)
-
-def inception_score(imgs, cuda=True, batch_size=32, resize=False, splits=1):
-    N = len(imgs)
-    assert batch_size > 0
-    assert N > batch_size
-
-    dtype = torch.cuda.FloatTensor if cuda else torch.FloatTensor
-
-    inception_model = inception_v3(weights=Inception_V3_Weights.IMAGENET1K_V1).type(dtype)
-    inception_model.eval()
-    up = nn.Upsample(size=(299, 299), mode='bilinear').type(dtype)
-
-    def get_pred(x):
-        x = up(x)
-        x = inception_model(x)
-        return F.softmax(x, dim=1).data.cpu().numpy()
-
-    preds = np.zeros((N, 1000))
-
-    for i in range(0, N, batch_size):
-        batch = imgs[i:i + batch_size].astype(np.float32)
-        batch = torch.from_numpy(batch).type(dtype)
-        preds[i:i + batch_size] = get_pred(batch)
-
-    split_scores = []
-
-    for k in range(splits):
-        part = preds[k * (N // splits): (k + 1) * (N // splits), :]
-        py = np.mean(part, axis=0)
-        scores = []
-        for i in range(part.shape[0]):
-            pyx = part[i, :]
-            scores.append(entropy(pyx, py))
-        split_scores.append(np.exp(np.mean(scores)))
-
-    return np.mean(split_scores), np.std(split_scores)
-
-def main(test_dir, batch_size, num_images=None):
+    # Setup transform
     transform = transforms.Compose([
         transforms.Resize((224, 224)),
         transforms.ToTensor()
     ])
 
-    all_image_paths = [os.path.join(test_dir, fname) for fname in os.listdir(test_dir) if os.path.isfile(os.path.join(test_dir, fname))]
-    if num_images:
-        all_image_paths = all_image_paths[:num_images]
-    dataset = ImageDataset(all_image_paths, transform=transform)
-    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=4, pin_memory=True)
+    # Load test dataset
+    test_dataset = CFDataLoader(
+        data_dir=args.test_dir,
+        transform=transform,
+        max_samples=args.num_test_images if args.num_test_images > 0 else None
+    )
 
-    cwgan = CWGAN(in_channels=1, out_channels=2)
-    cwgan.load_model('models/ResUnet_latest.pt', 'models/PatchGAN_latest.pt')
-    cwgan.generator.eval()
+    # Fast DataLoader configuration
+    test_loader = DataLoader(
+        test_dataset,
+        batch_size=args.batch_size,
+        num_workers=args.num_workers,
+        pin_memory=True,
+        persistent_workers=True
+    )
 
-    real_images, fake_images = [], []
-
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    cwgan.generator.to(device)
-
-    for batch in dataloader:
-        batch = batch.to(device)
-        with torch.no_grad():
-            L_batch = torch.cat([preprocess_image(img)[0].to(device) for img in batch])
-            gen_images_batch = cwgan.generator(L_batch)
-            for i in range(gen_images_batch.size(0)):
-                fake_images.append(postprocess_image(L_batch[i], gen_images_batch[i]))
-                real_images.append(postprocess_image(*preprocess_image(batch[i].cpu())))
-
-    clear_directory('testing/real_images')
-    clear_directory('testing/fake_images')
-
-    save_images(real_images, 'testing/real_images', 'real')
-    save_images(fake_images, 'testing/fake_images', 'fake')
-
-    fid, inception, ssim_val, psnr_val = evaluate_metrics(real_images, fake_images)
-
-    print(f'FID: {fid}')
-    print(f'Inception Score: {inception}')
-    print(f'SSIM: {ssim_val}')
-    print(f'PSNR: {psnr_val}')
+    # Add output directory for test results
+    args.output_dir = os.path.join(os.path.dirname(args.checkpoint_path), 'test_results')
+    os.makedirs(args.output_dir, exist_ok=True)
+    
+    # Run evaluation
+    metrics = evaluate_model(model, test_loader, device, args)
+    
+    # Print results
+    print("\nEvaluation Results:")
+    print(f"PSNR: {metrics['psnr']:.2f}")
+    print(f"SSIM: {metrics['ssim']:.4f}")
+    print(f"\nResults saved to: {args.output_dir}")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description='Test CWGAN on a specified dataset and calculate metrics.')
-    parser.add_argument('--test_dir', type=str, required=True, help='Path to the test data directory')
-    parser.add_argument('--batch_size', type=int, default=32, help='Batch size for testing')
-    parser.add_argument('--num_images', type=int, default=None, help='Number of images to test')
-
+    parser = argparse.ArgumentParser(description='Test the colorization model')
+    parser.add_argument('--test_dir', type=str, required=True, help='Path to test data directory')
+    parser.add_argument('--checkpoint_path', type=str, required=True, help='Path to model checkpoint')
+    parser.add_argument('--batch_size', type=int, default=64, help='Batch size for testing')
+    parser.add_argument('--num_workers', type=int, default=4, help='Number of data loading workers')
+    parser.add_argument('--num_test_images', type=int, default=0, help='Number of test images (0 for all)')
+    parser.add_argument('--num_visualizations', type=int, default=5, 
+                       help='Number of test images to visualize')
+    parser.add_argument('--output_dir', type=str, default=None,
+                       help='Directory to save test results (default: checkpoint_dir/test_results)')
+    
     args = parser.parse_args()
-
-    main(args.test_dir, args.batch_size, args.num_images)
+    main(args)
